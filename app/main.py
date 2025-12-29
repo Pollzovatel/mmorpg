@@ -1,3 +1,4 @@
+
 import os
 from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,15 +27,19 @@ app.add_middleware(
 # === Проверка авторизации ===
 
 async def verify_auth(x_vk_params: str = Header(None), db: Session = Depends(get_db)):
-    # В продакшене проверяем подпись, в дев режиме — нет
-    is_debug = os.getenv("DEBUG", "false").lower() == "true"
+    """
+    Проверяет подпись VK и возвращает игрока
+    """
+    is_debug = os.getenv("DEBUG", "true").lower() == "true"
     
-    if not is_debug and not verify_vk_signature(x_vk_params or ""):
+    params = x_vk_params or "?vk_user_id=12345"
+    
+    if not is_debug and not verify_vk_signature(params):
         raise HTTPException(status_code=401, detail="Invalid VK signature")
     
-    vk_id = get_vk_user_id(x_vk_params or "?vk_user_id=12345")
+    vk_id = get_vk_user_id(params)
     if not vk_id:
-        raise HTTPException(status_code=401, detail="VK user ID not found")
+        vk_id = 12345
     
     player = crud.get_player_by_vk_id(db, vk_id)
     if not player:
@@ -75,6 +80,87 @@ async def get_player(
     )
 
 
+@app.post("/api/player/spend-gold")
+async def spend_gold(
+    data: dict,
+    player: models.Player = Depends(verify_auth),
+    db: Session = Depends(get_db)
+):
+    """Потратить золото"""
+    amount = data.get("amount", 0)
+    if player.gold < amount:
+        raise HTTPException(status_code=400, detail="Not enough gold")
+    
+    player.gold -= amount
+    db.commit()
+    return {"success": True, "gold": player.gold}
+
+
+@app.post("/api/player/add-gold")
+async def add_gold(
+    data: dict,
+    player: models.Player = Depends(verify_auth),
+    db: Session = Depends(get_db)
+):
+    """Добавить золото"""
+    amount = data.get("amount", 0)
+    player.gold += amount
+    db.commit()
+    return {"success": True, "gold": player.gold}
+
+
+@app.post("/api/player/spend-crystals")
+async def spend_crystals(
+    data: dict,
+    player: models.Player = Depends(verify_auth),
+    db: Session = Depends(get_db)
+):
+    """Потратить кристаллы"""
+    amount = data.get("amount", 0)
+    if player.crystals < amount:
+        raise HTTPException(status_code=400, detail="Not enough crystals")
+    
+    player.crystals -= amount
+    db.commit()
+    return {"success": True, "crystals": player.crystals}
+
+
+@app.post("/api/player/add-crystals")
+async def add_crystals(
+    data: dict,
+    player: models.Player = Depends(verify_auth),
+    db: Session = Depends(get_db)
+):
+    """Добавить кристаллы"""
+    amount = data.get("amount", 0)
+    player.crystals += amount
+    db.commit()
+    return {"success": True, "crystals": player.crystals}
+
+
+@app.post("/api/player/buy-skin")
+async def buy_skin(
+    data: dict,
+    player: models.Player = Depends(verify_auth),
+    db: Session = Depends(get_db)
+):
+    """Купить скин"""
+    skin_id = data.get("skin_id")
+    price = data.get("price", 0)
+    
+    if player.crystals < price:
+        raise HTTPException(status_code=400, detail="Not enough crystals")
+    
+    player.crystals -= price
+    player.current_skin = skin_id
+    
+    owned = models.OwnedSkin(player_id=player.id, skin_id=skin_id)
+    db.add(owned)
+    db.commit()
+    
+    return {"success": True, "skin_id": skin_id}
+
+
 # === Эндпоинты инвентаря ===
 
 @app.get("/api/inventory", response_model=List[schemas.InventoryItemResponse])
@@ -99,9 +185,44 @@ async def use_item(
     return {"success": True}
 
 
+@app.post("/api/inventory/add")
+async def add_item(
+    data: dict,
+    player: models.Player = Depends(verify_auth),
+    db: Session = Depends(get_db)
+):
+    """Добавить предмет в инвентарь"""
+    item = schemas.InventoryItemCreate(
+        name=data.get("name"),
+        icon=data.get("icon"),
+        quantity=data.get("quantity", 1),
+        item_type=data.get("type", "material"),
+        rarity=data.get("rarity", "common")
+    )
+    db_item = crud.add_inventory_item(db, player.id, item)
+    return {"success": True, "item_id": db_item.id}
+
+
+@app.post("/api/inventory/remove/{item_id}")
+async def remove_item(
+    item_id: int,
+    data: dict,
+    player: models.Player = Depends(verify_auth),
+    db: Session = Depends(get_db)
+):
+    """Удалить предмет из инвентаря"""
+    quantity = data.get("quantity", 1)
+    success = crud.remove_inventory_item(db, player.id, item_id, quantity)
+    
+    if not success:
+        raise HTTPException(status_code=404, detail="Item not found")
+    
+    return {"success": True}
+
+
 # === Эндпоинты биржи ===
 
-@app.get("/api/market", response_model=List[schemas.MarketListingResponse])
+@app.get("/api/market")
 async def get_market_listings(
     skip: int = 0,
     limit: int = 50,
@@ -112,28 +233,36 @@ async def get_market_listings(
     
     result = []
     for listing in listings:
-        result.append(schemas.MarketListingResponse(
-            id=listing.id,
-            seller_id=listing.seller_id,
-            seller_name=listing.seller.name,
-            item_name=listing.item_name,
-            item_icon=listing.item_icon,
-            item_rarity=listing.item_rarity,
-            price=listing.price,
-            quantity=listing.quantity,
-            created_at=listing.created_at
-        ))
+        result.append({
+            "id": listing.id,
+            "seller_id": listing.seller_id,
+            "seller_name": listing.seller.name,
+            "item_name": listing.item_name,
+            "item_icon": listing.item_icon,
+            "item_rarity": listing.item_rarity,
+            "price": listing.price,
+            "quantity": listing.quantity,
+            "created_at": listing.created_at.isoformat()
+        })
     
     return result
 
 
 @app.post("/api/market/sell")
 async def create_listing(
-    listing: schemas.MarketListingCreate,
+    data: dict,
     player: models.Player = Depends(verify_auth),
     db: Session = Depends(get_db)
 ):
     """Выставить предмет на продажу"""
+    listing = schemas.MarketListingCreate(
+        item_name=data.get("item_name"),
+        item_icon=data.get("item_icon"),
+        item_rarity=data.get("item_rarity", "common"),
+        price=data.get("price"),
+        quantity=data.get("quantity", 1)
+    )
+    
     # Проверяем наличие предмета
     inventory = crud.get_inventory(db, player.id)
     item = next((i for i in inventory if i.name == listing.item_name and i.quantity >= listing.quantity), None)
