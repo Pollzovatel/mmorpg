@@ -5,6 +5,12 @@ import os
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# Для Supabase нужно заменить postgres:// на postgresql://
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+engine = create_engine(DATABASE_URL)
+
 # Supabase/Heroku используют postgres://, SQLAlchemy нужен postgresql://
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
